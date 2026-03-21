@@ -384,68 +384,8 @@ def finite_element_analysis(Sectionalradius1, angle1, radius1 , Lumbus1, Section
     mdb.jobs[jobName_NonLinear].submit()
     mdb.jobs[jobName_NonLinear].waitForCompletion()
     mdb.save()
-    cleanup_non_essential_files(jobnum)
 
 
-
-def resultread(jobnum):
-    current_directory = os.getcwd()
-    odb_filename = "cgltNonLinear_no{}.odb".format(jobnum)
-    odb_path = os.path.join(current_directory, odb_filename)
-    odb = session.openOdb(odb_path)
-
-    session.viewports['Viewport: 1'].setValues(displayedObject=odb)
-    odbName = session.viewports[session.currentViewportName].odbDisplay.name
-
-    session.odbData[odbName].setValues(activeFrames=(('Step-NonLinearBuckle', (10000,)),))
-    session.xyDataListFromField(odb=odb, outputPosition=NODAL, variable=(
-        ('UR', NODAL, ((INVARIANT, 'Magnitude'),)), ('RM', NODAL, ((INVARIANT, 'Magnitude'),)),),
-                                nodeSets=("REFERENCE-POINT-2",))
-
-    def create_or_open_csv(csv_path):
-        if not os.path.exists(csv_path):
-            with open(csv_path, 'w') as file:
-                writer = csv.writer(file)
-                writer.writerow(['UR', 'RM'])
-            print("CSV file created:", csv_path)
-
-    def get_combined_data():
-        xy1 = session.xyDataObjects['UR:Magnitude PI: ASSEMBLY N: 2']
-        xy2 = session.xyDataObjects['RM:Magnitude PI: ASSEMBLY N: 2']
-        xy3 = combine(xy1, xy2)
-        data = xy3.data
-        return data
-
-    def save_data_to_csv(data, csv_path):
-        with open(csv_path, 'wb') as file:
-            writer = csv.writer(file)
-            writer.writerows(data)
-        print("Data appended to CSV file:", csv_path)
-
-    data = get_combined_data()
-    csv_path = 'cgltNonLinear_no{}.csv'.format(jobnum)
-    create_or_open_csv(csv_path)
-    save_data_to_csv(data, csv_path)
-    del session.xyDataObjects['UR:Magnitude PI: ASSEMBLY N: 2']
-    del session.xyDataObjects['RM:Magnitude PI: ASSEMBLY N: 2']
-    print("The result has been saved.")
-
-def cleanup_non_essential_files(jobnum):
-    
-    jobName_NonLinear = 'cgltNonLinear_no{}'.format(jobnum)
-    jobName_Linear = 'cgltLinear_no{}'.format(jobnum)
-
-    non_essential_extensions = ['dat', 'log', 'msg','ipm' ,'sta','jnl', 'com', 'prt', 'sim', 'mdl']
-
-    for job_prefix in [jobName_NonLinear, jobName_Linear]:
-        for ext in non_essential_extensions:
-            file_pattern = '{}.{}'.format(job_prefix, ext)
-            for file_path in glob.glob(file_pattern):
-                try:
-                    os.remove(file_path)
-                    print("Deleted file: {}".format(file_path))
-                except OSError as e:
-                    print("Error deleting file {}: {}".format(file_path, e))
 
 
 def run_finite_element_jobs(csv_filename='selected_pairs.csv', jobmax=10, start_jobnum=1):
@@ -484,20 +424,13 @@ def run_finite_element_jobs(csv_filename='selected_pairs.csv', jobmax=10, start_
           
             finite_element_analysis(Sectionalradius1, angle1, radius1, Lumbus1,
                                     Sectionalradius2, angle2, radius2, Lumbus2, jobnum)
-            
-            resultread(jobnum)
 
-            try:
-                row = next(reader)
-            except StopIteration:
-                print("Reached the end of the CSV file.")
-                break
 
 if __name__ == "__main__":
-    csv_filename = os.path.join('/public/home/wanghaobo/cglt', 'selected_pairs.csv')
+    csv_filename = os.path.join('/home', 'selected_pairs.csv')
     jobmax = 5000
     start_jobnum = 1  
     run_finite_element_jobs(csv_filename=csv_filename, jobmax=jobmax, start_jobnum=start_jobnum)
-    print("All jobs completed.")
+
 
 
