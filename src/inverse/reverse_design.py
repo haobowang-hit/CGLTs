@@ -488,27 +488,23 @@ def main():
 
     
 
-    parser.add_argument('--checkpoint_dir', type=str, 
-
-                       default=r'H:\pythonProject\CGLT-V1-main\CGLT\src\checkpoints',
+    parser.add_argument('--checkpoint_dir', type=str,
+                       default='./checkpoints',
 
                        help='Directory containing trained models')
 
-    parser.add_argument('--test_curve_csv', type=str, 
-
-                       default=r'H:\pythonProject\CGLT-V1-main\CGLT\processed_data\independent_test_pairs.csv',
+    parser.add_argument('--test_curve_csv', type=str,
+                       default='./data/input/independent_test_pairs.csv',
 
                        help='CSV file containing independent test curves')
 
-    parser.add_argument('--test_curve_dir', type=str, 
-
-                       default=r'H:\pythonProject\CGLT-V1-main\CGLT\testdataset',
+    parser.add_argument('--test_curve_dir', type=str,
+                       default='./data/output',
 
                        help='Directory containing test curve files')
 
-    parser.add_argument('--save_dir', type=str, 
-
-                       default=r'H:\pythonProject\CGLT-V1-main\CGLT\enhanced_inverse_results',
+    parser.add_argument('--save_dir', type=str,
+                       default='./inverse_results',
 
                        help='Directory to save inverse design results')
 

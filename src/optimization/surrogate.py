@@ -1,17 +1,4 @@
-"""
-CGLT 代理模型预测接口
-=====================
-封装深度学习模型的预测功能，提供统一的API
 
-功能:
-- 从设计参数预测力-位移曲线
-- 提取性能指标 (PBS/NCL/NCA)
-- 计算DTW距离
-- 批量预测
-
-作者: 王浩博
-单位: 哈尔滨工业大学
-"""
 
 import os
 import sys
@@ -21,9 +8,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 import pickle
 
-# 添加src路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SRC_DIR = os.path.join(SCRIPT_DIR, '..', 'src')
+SRC_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 sys.path.insert(0, SRC_DIR)
 
 try:
@@ -207,18 +193,22 @@ class SurrogatePredictor:
             feature_dim=self.feature_dim
         ).to(self.device)
 
-        # 加载权重路径
-        encoder_path = os.path.join(self.checkpoint_dir, 'best_encoder.pt')
-        decoder_path = os.path.join(self.checkpoint_dir, 'best_decoder.pt')
-        mapper_path = os.path.join(self.checkpoint_dir, 'best_mapper.pt')
+        def resolve_ckpt(candidates):
+            for name in candidates:
+                p = os.path.join(self.checkpoint_dir, name)
+                if os.path.exists(p):
+                    return p
+            return None
 
-        # 如果best模型不存在，尝试加载普通模型
-        if not os.path.exists(encoder_path):
-            encoder_path = os.path.join(self.checkpoint_dir, 'encoder.pt')
-        if not os.path.exists(decoder_path):
-            decoder_path = os.path.join(self.checkpoint_dir, 'decoder.pt')
-        if not os.path.exists(mapper_path):
-            mapper_path = os.path.join(self.checkpoint_dir, 'mapper.pt')
+        encoder_path = resolve_ckpt(['best_encoder.pt', 'final_encoder.pt', 'encoder.pt'])
+        decoder_path = resolve_ckpt(['best_decoder.pt', 'final_decoder.pt', 'decoder.pt'])
+        mapper_path = resolve_ckpt(['best_mapper.pt', 'final_mapper.pt', 'mapper.pt'])
+
+        if encoder_path is None or decoder_path is None or mapper_path is None:
+            raise FileNotFoundError(
+                f"Missing checkpoints in {self.checkpoint_dir}. "
+                f"Need encoder/decoder/mapper (best or final or plain names)."
+            )
 
         # 加载encoder和decoder
         load_model(self.encoder, encoder_path, self.device)
@@ -256,15 +246,28 @@ class SurrogatePredictor:
 
     def _load_normalization_params(self):
         """加载归一化参数"""
-        norm_path = os.path.join(self.checkpoint_dir, 'normalization_params.pkl')
+        scaler_path = os.path.join(self.checkpoint_dir, 'feature_scaler.pkl')
+        curve_path = os.path.join(self.checkpoint_dir, 'curve_norm.npz')
+        legacy_path = os.path.join(self.checkpoint_dir, 'normalization_params.pkl')
 
-        if os.path.exists(norm_path):
-            with open(norm_path, 'rb') as f:
+        if os.path.exists(scaler_path) and os.path.exists(curve_path):
+            with open(scaler_path, 'rb') as f:
+                scaler = pickle.load(f)
+            curve_params = np.load(curve_path)
+            curve_min = curve_params['curve_min']
+            curve_max = curve_params['curve_max']
+            self.norm_params = (scaler, curve_min, curve_max)
+            print("Normalization parameters loaded (feature_scaler.pkl + curve_norm.npz).")
+            return
+
+        if os.path.exists(legacy_path):
+            with open(legacy_path, 'rb') as f:
                 self.norm_params = pickle.load(f)
-            print("Normalization parameters loaded!")
-        else:
-            print("Warning: Normalization parameters not found, using default ranges")
-            self.norm_params = None
+            print("Normalization parameters loaded (legacy normalization_params.pkl).")
+            return
+
+        print("Warning: Normalization parameters not found, using default ranges")
+        self.norm_params = None
 
     def normalize_parameters(self, params_raw: Union[List, np.ndarray]) -> np.ndarray:
         """

@@ -1,21 +1,4 @@
-"""
-混合多目标优化 - 密集搜索版
-================================
-结合历史数据 + 贝叶斯优化 + 多路径策略
 
-特点:
-  1. 加载现有 results.csv 数据
-  2. 使用贝叶斯优化生成更多高质量设计
-  3. 合并数据集，提取帕累托前沿
-  4. 使用多条优化路径（按不同目标排序）
-  5. 生成高密度可视化
-
-使用:
-  python hybrid_moo_dense_search.py --checkpoint-dir ../src/checkpoints --n-trials 500 --device cuda
-
-作者: 王浩博
-单位: 哈尔滨工业大学
-"""
 
 import os
 import sys
@@ -533,13 +516,176 @@ def plot_pareto_with_paths(
     print(f"[✓] {fig4_path}")
 
 
+def extract_pareto_front(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    基于 PBS↑, NCL↑, omega↓ 提取三目标帕累托前沿。
+    """
+    if df.empty:
+        return df.copy()
+
+    costs = np.column_stack([
+        -df['PBS'].values,
+        -df['NCL'].values,
+        df['omega'].values,
+    ])
+    mask = is_pareto_efficient_3d(costs)
+    return df[mask].copy().reset_index(drop=True)
+
+
+def compute_recommendations(pareto_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    从帕累托前沿中按多种策略筛选推荐设计。
+    """
+    if pareto_df.empty:
+        return pd.DataFrame()
+
+    eps = 1e-8
+    pbs_norm = (pareto_df['PBS'] - pareto_df['PBS'].min()) / (pareto_df['PBS'].max() - pareto_df['PBS'].min() + eps)
+    ncl_norm = (pareto_df['NCL'] - pareto_df['NCL'].min()) / (pareto_df['NCL'].max() - pareto_df['NCL'].min() + eps)
+    nca_norm = (pareto_df['NCA'] - pareto_df['NCA'].min()) / (pareto_df['NCA'].max() - pareto_df['NCA'].min() + eps)
+    mtrim_norm = (pareto_df['M_trim'] - pareto_df['M_trim'].min()) / (pareto_df['M_trim'].max() - pareto_df['M_trim'].min() + eps)
+
+    recs = []
+
+    ideal_dist = np.sqrt((1.0 - pbs_norm) ** 2 + (1.0 - ncl_norm) ** 2 + (1.0 - nca_norm) ** 2 + mtrim_norm ** 2)
+    idx = ideal_dist.idxmin()
+    row = pareto_df.loc[idx].to_dict()
+    row['strategy'] = 'Ideal Point'
+    row['score'] = float(1.0 / (ideal_dist.loc[idx] + eps))
+    recs.append(row)
+
+    weighted_balanced = 0.3 * pbs_norm + 0.3 * ncl_norm + 0.2 * nca_norm + 0.2 * (1.0 - mtrim_norm)
+    idx = weighted_balanced.idxmax()
+    row = pareto_df.loc[idx].to_dict()
+    row['strategy'] = 'Weighted Sum-Balanced'
+    row['score'] = float(weighted_balanced.loc[idx])
+    recs.append(row)
+
+    weighted_strength = 0.5 * pbs_norm + 0.3 * ncl_norm + 0.1 * nca_norm + 0.1 * (1.0 - mtrim_norm)
+    idx = weighted_strength.idxmax()
+    row = pareto_df.loc[idx].to_dict()
+    row['strategy'] = 'Weighted Sum-Strength'
+    row['score'] = float(weighted_strength.loc[idx])
+    recs.append(row)
+
+    weighted_light = 0.2 * pbs_norm + 0.2 * ncl_norm + 0.1 * nca_norm + 0.5 * (1.0 - mtrim_norm)
+    idx = weighted_light.idxmax()
+    row = pareto_df.loc[idx].to_dict()
+    row['strategy'] = 'Weighted Sum-Lightweight'
+    row['score'] = float(weighted_light.loc[idx])
+    recs.append(row)
+
+    return pd.DataFrame(recs)
+
+
+def run_mode_bayesian(args, predictor):
+    """
+    仅基于贝叶斯优化生成设计，不合并历史数据。
+    """
+    print(f"\n{'='*70}")
+    print("运行模式: bayesian")
+    print(f"{'='*70}")
+
+    all_df = generate_new_designs_bayesian(predictor, args.n_trials, args.device)
+    if all_df.empty:
+        print("[警告] 未生成有效设计，流程结束")
+        return
+
+    all_df['omega'] = 1.0 - all_df['M_trim']
+    pareto_df = extract_pareto_front(all_df)
+
+    os.makedirs(args.output, exist_ok=True)
+    all_path = os.path.join(args.output, 'all_valid_designs.csv')
+    pareto_path = os.path.join(args.output, 'pareto_front_designs.csv')
+    rec_path = os.path.join(args.output, 'recommended_designs.csv')
+
+    all_df.to_csv(all_path, index=False)
+    pareto_df.to_csv(pareto_path, index=False)
+    compute_recommendations(pareto_df).to_csv(rec_path, index=False)
+
+    print(f"[✓] 所有有效设计: {all_path}")
+    print(f"[✓] 帕累托前沿: {pareto_path}")
+    print(f"[✓] 推荐设计: {rec_path}")
+
+    plot_pareto_with_paths(all_df, pareto_df, args.output)
+
+
+def run_mode_hybrid(args, predictor):
+    """
+    混合模式：历史结果 + 贝叶斯优化 + （可选）帕累托区域密集化。
+    """
+    print(f"\n{'='*70}")
+    print("运行模式: hybrid")
+    print(f"{'='*70}")
+
+    # 1. 加载现有数据
+    existing_df = load_existing_data(args.results_csv)
+
+    # 2. 生成新设计（贝叶斯优化）
+    new_df = generate_new_designs_bayesian(predictor, args.n_trials, args.device)
+
+    # 3. 合并数据
+    print(f"\n{'='*70}")
+    print("合并数据集")
+    print(f"{'='*70}")
+
+    if existing_df is not None:
+        existing_df['source'] = 'historical'
+        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        print(f"历史数据: {len(existing_df)}")
+        print(f"新生成: {len(new_df)}")
+    else:
+        combined_df = new_df
+        print(f"仅新数据: {len(new_df)}")
+
+    print(f"合并后总数: {len(combined_df)}")
+    combined_df['omega'] = 1.0 - combined_df['M_trim']
+
+    # 4. 提取帕累托前沿
+    print(f"\n{'='*70}")
+    print("提取帕累托前沿")
+    print(f"{'='*70}")
+
+    pareto_df = extract_pareto_front(combined_df)
+    print(f"帕累托前沿设计: {len(pareto_df)} ({len(pareto_df) / len(combined_df) * 100:.2f}%)")
+
+    # 5. 密集化帕累托区域（可选）
+    if args.n_densify > 0:
+        dense_df = densify_pareto_region(pareto_df, predictor, args.n_densify)
+        if len(dense_df) > 0:
+            dense_df['omega'] = 1.0 - dense_df['M_trim']
+            combined_df = pd.concat([combined_df, dense_df], ignore_index=True)
+            pareto_df = extract_pareto_front(combined_df)
+            print(f"密集化后帕累托前沿: {len(pareto_df)}")
+            print(f"最终数据集大小: {len(combined_df)}")
+
+    # 6. 保存结果
+    print(f"\n{'='*70}")
+    print("保存结果")
+    print(f"{'='*70}")
+
+    os.makedirs(args.output, exist_ok=True)
+    combined_path = os.path.join(args.output, 'all_designs_hybrid.csv')
+    pareto_path = os.path.join(args.output, 'pareto_front_hybrid.csv')
+    combined_df.to_csv(combined_path, index=False)
+    pareto_df.to_csv(pareto_path, index=False)
+
+    print(f"[✓] 所有设计: {combined_path}")
+    print(f"[✓] 帕累托前沿: {pareto_path}")
+
+    # 7. 可视化
+    plot_pareto_with_paths(combined_df, pareto_df, args.output)
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description='混合多目标优化 - 密集搜索版',
+        description='CGLT 多目标优化统一脚本（bayesian / hybrid）',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
+    parser.add_argument('--mode', type=str, default='hybrid',
+                       choices=['hybrid', 'bayesian'],
+                       help='运行模式：hybrid(默认) 或 bayesian')
     parser.add_argument('--checkpoint-dir', type=str, required=True,
                        help='模型检查点目录')
     parser.add_argument('--results-csv', type=str, default='results.csv',
@@ -550,18 +696,22 @@ def main():
                        help='每个帕累托设计的密集化样本数（默认: 5）')
     parser.add_argument('--device', type=str, default='cuda',
                        choices=['cuda', 'cpu'], help='计算设备')
-    parser.add_argument('--output', type=str, default='./hybrid_moo_results',
+    parser.add_argument('--output', type=str, default='./moo_results',
                        help='输出目录')
+    parser.add_argument('--timeout', type=int, default=None,
+                       help='优化超时时间(秒)，当前版本中保留兼容参数')
 
     args = parser.parse_args()
 
     print(f"\n{'='*70}")
-    print("混合多目标优化 - 密集搜索版")
+    print("CGLT 多目标优化统一脚本")
     print(f"{'='*70}")
+    print(f"运行模式: {args.mode}")
     print(f"模型路径: {args.checkpoint_dir}")
-    print(f"现有数据: {args.results_csv}")
     print(f"新增试验: {args.n_trials}")
-    print(f"密集化因子: {args.n_densify}")
+    if args.mode == 'hybrid':
+        print(f"现有数据: {args.results_csv}")
+        print(f"密集化因子: {args.n_densify}")
     print(f"输出目录: {args.output}")
     print(f"{'='*70}")
 
@@ -575,132 +725,10 @@ def main():
     )
     print("[✓] 模型加载成功!")
 
-    # 2. 加载现有数据
-    existing_df = load_existing_data(args.results_csv)
-
-    # 3. 生成新设计（贝叶斯优化）
-    new_df = generate_new_designs_bayesian(predictor, args.n_trials, args.device)
-
-    # 4. 合并数据
-    print(f"\n{'='*70}")
-    print("合并数据集")
-    print(f"{'='*70}")
-
-    if existing_df is not None:
-        # 标记数据来源
-        existing_df['source'] = 'historical'
-        # 合并
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-        print(f"历史数据: {len(existing_df)}")
-        print(f"新生成: {len(new_df)}")
+    if args.mode == 'bayesian':
+        run_mode_bayesian(args, predictor)
     else:
-        combined_df = new_df
-        print(f"仅新数据: {len(new_df)}")
-
-    print(f"合并后总数: {len(combined_df)}")
-
-    combined_df['omega'] = 1.0 - combined_df['M_trim']
-
-    # 5. 提取帕累托前沿
-    print(f"\n{'='*70}")
-    print("提取帕累托前沿")
-    print(f"{'='*70}")
-
-    costs = np.column_stack([
-        -combined_df['PBS'].values,  # PBS越大越好，取负数
-        -combined_df['NCL'].values,  # NCL越大越好，取负数
-        combined_df['omega'].values   # omega越小越好，不取负
-    ])
-
-    pareto_mask = is_pareto_efficient_3d(costs)
-    pareto_df = combined_df[pareto_mask].copy().reset_index(drop=True)
-
-    print(f"帕累托前沿设计: {len(pareto_df)} ({len(pareto_df)/len(combined_df)*100:.2f}%)")
-
-    # 6. 密集化帕累托区域
-    if args.n_densify > 0:
-        dense_df = densify_pareto_region(pareto_df, predictor, args.n_densify)
-
-        if len(dense_df) > 0:
-            # 计算密集化数据的omega
-            dense_df['omega'] = 1.0 - dense_df['M_trim']
-
-            # 将密集化数据加入总数据集
-            combined_df = pd.concat([combined_df, dense_df], ignore_index=True)
-
-            # 重新提取帕累托前沿
-            costs = np.column_stack([
-                -combined_df['PBS'].values,   # PBS越大越好，取负数
-                -combined_df['NCL'].values,   # NCL越大越好，取负数
-                combined_df['omega'].values   # omega越小越好，不取负
-            ])
-            pareto_mask = is_pareto_efficient_3d(costs)
-            pareto_df = combined_df[pareto_mask].copy().reset_index(drop=True)
-
-            print(f"密集化后帕累托前沿: {len(pareto_df)}")
-            print(f"最终数据集大小: {len(combined_df)}")
-
-    # 7. 保存结果
-    print(f"\n{'='*70}")
-    print("保存结果")
-    print(f"{'='*70}")
-
-    os.makedirs(args.output, exist_ok=True)
-
-    combined_path = os.path.join(args.output, 'all_designs_hybrid.csv')
-    combined_df.to_csv(combined_path, index=False)
-    print(f"[✓] 所有设计: {combined_path}")
-
-    pareto_path = os.path.join(args.output, 'pareto_front_hybrid.csv')
-    pareto_df.to_csv(pareto_path, index=False)
-    print(f"[✓] 帕累托前沿: {pareto_path}")
-
-    # 8. 生成可视化
-    plot_pareto_with_paths(combined_df, pareto_df, args.output)
-
-    # 9. 统计摘要
-    print(f"\n{'='*70}")
-    print("优化完成!")
-    print(f"{'='*70}")
-    print(f"\n数据统计:")
-    print(f"  总设计数: {len(combined_df)}")
-    print(f"  帕累托前沿: {len(pareto_df)}")
-    print(f"\n性能范围:")
-    print(f"  PBS:   [{pareto_df['PBS'].min():.4f}, {pareto_df['PBS'].max():.4f}]")
-    print(f"  NCL:   [{pareto_df['NCL'].min():.4f}, {pareto_df['NCL'].max():.4f}]")
-    print(f"  NCA:   [{pareto_df['NCA'].min():.4f}, {pareto_df['NCA'].max():.4f}]")
-    print(f"  omega: [{pareto_df['omega'].min():.6f}, {pareto_df['omega'].max():.6f}]")
-    print(f"  (对应M_trim: [{pareto_df['M_trim'].min():.6f}, {pareto_df['M_trim'].max():.6f}])")
-
-    # 打印每个帕累托最优设计的详细信息
-    print(f"\n{'='*70}")
-    print(f"帕累托最优设计详情 (共 {len(pareto_df)} 个)")
-    print(f"{'='*70}")
-
-    # 按omega排序（从小到大，轻量化优先）
-    pareto_sorted = pareto_df.sort_values('omega').reset_index(drop=True)
-
-    for idx, row in pareto_sorted.iterrows():
-        print(f"\n【设计 #{idx+1}】")
-        print(f"  设计参数:")
-        print(f"    H1={row['H1']:.1f}, L1={row['L1']:.2f}, r1={row['r1']:.2f}, a1={row['a1']:.1f}°")
-        print(f"    H2={row['H2']:.1f}, L2={row['L2']:.2f}, r2={row['r2']:.2f}, a2={row['a2']:.1f}°")
-        print(f"  性能指标:")
-        print(f"    PBS = {row['PBS']:.4f} Nm/rad")
-        print(f"    NCL = {row['NCL']:.4f} Nm")
-        print(f"    NCA = {row['NCA']:.4f} rad")
-        print(f"    ω   = {row['omega']:.6f} (质量保留率)")
-        print(f"  来源: {row.get('source', 'unknown')}")
-
-    print(f"\n生成的文件:")
-    print(f"  - {args.output}/all_designs_hybrid.csv")
-    print(f"  - {args.output}/pareto_front_hybrid.csv")
-    print(f"  - {args.output}/pareto_3d_with_paths.png")
-    print(f"  - {args.output}/pareto_2d_ncl_pbs.png")
-    print(f"  - {args.output}/pareto_2d_omega_pbs.png")
-    print(f"  - {args.output}/pareto_2d_omega_ncl.png")
-    print(f"  - {args.output}/pareto_2d_nca_pbs.png")
-    print(f"\n{'='*70}\n")
+        run_mode_hybrid(args, predictor)
 
 
 if __name__ == "__main__":
